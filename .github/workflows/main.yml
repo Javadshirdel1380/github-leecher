@@ -1,4 +1,4 @@
-name:  انتقال فایل به گیت هاب
+name: انتقال فایل به گیت هاب
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 jobs:
-  leech-split-file: 
+  leech-split-file:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,17 +26,21 @@ jobs:
           fetch-depth: 1
 
       - name: Install 7z
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
 
       - name: Download file
+        id: download_file
         run: |
           curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
           echo "File downloaded. Size: $(ls -lh downloaded_file | awk '{print $5}')"
+          echo "downloaded_file_name=downloaded_file" >> $GITHUB_OUTPUT
 
-            - name: Extract original filename and prepare for archive
+      - name: Extract original filename and prepare for archive
         id: get_filename
         run: |
-          DOWNLOADED_FILE="downloaded_file"
+          DOWNLOADED_FILE="${{ steps.download_file.outputs.downloaded_file_name }}"
           ORIGINAL_URL="${{ github.event.inputs.file_url }}"
 
           # استخراج نام فایل از URL
@@ -51,7 +55,7 @@ jobs:
 
           # اگر پسوندی وجود نداشت (یعنی فایل بدون پسوند بود)، پسوند را خالی در نظر می‌گیریم
           if [[ "$FILENAME_BASE" == "$FILENAME_FROM_URL" ]]; then
-              FILENAME_EXT=""
+            FILENAME_EXT=""
           fi
 
           # پیشوند دلخواه
@@ -61,77 +65,86 @@ jobs:
           FULL_ARCHIVE_NAME="${ARCHIVE_PREFIX}${FILENAME_BASE}"
 
           # --- مدیریت طول نام فایل ---
-          MAX_TOTAL_LEN=100 
+          MAX_TOTAL_LEN=20
           CURRENT_LEN=${#FULL_ARCHIVE_NAME}
 
           if [[ $CURRENT_LEN -gt $MAX_TOTAL_LEN ]]; then
-              BASE_LEN_TO_KEEP=$((MAX_TOTAL_LEN - ${#ARCHIVE_PREFIX} - ${#FILENAME_EXT} - 1)) 
-              if [[ $BASE_LEN_TO_KEEP -lt 1 ]]; then BASE_LEN_TO_KEEP=1; fi 
-              
-              SHORT_FILENAME_BASE=$(echo "$FILENAME_BASE" | cut -c 1-$BASE_LEN_TO_KEEP)
-              FULL_ARCHIVE_NAME="${ARCHIVE_PREFIX}${SHORT_FILENAME_BASE}"
+            BASE_LEN_TO_KEEP=$((MAX_TOTAL_LEN - ${#ARCHIVE_PREFIX} - ${#FILENAME_EXT} - 1))
+            if [[ $BASE_LEN_TO_KEEP -lt 1 ]]; then BASE_LEN_TO_KEEP=1; fi
+            SHORT_FILENAME_BASE=$(echo "$FILENAME_BASE" | cut -c 1-$BASE_LEN_TO_KEEP)
+            FULL_ARCHIVE_NAME="${ARCHIVE_PREFIX}${SHORT_FILENAME_BASE}"
           fi
           
           # اضافه کردن پسوند نهایی (اگر وجود داشت)
           if [[ -n "$FILENAME_EXT" ]]; then
-              FINAL_ARCHIVE_FILENAME="${FULL_ARCHIVE_NAME}.${FILENAME_EXT}"
+            FINAL_ARCHIVE_FILENAME="${FULL_ARCHIVE_NAME}.${FILENAME_EXT}"
           else
-              FINAL_ARCHIVE_FILENAME="${FULL_ARCHIVE_NAME}"
+            FINAL_ARCHIVE_FILENAME="${FULL_ARCHIVE_NAME}"
           fi
-          
+
           echo "Original file name: ${FILENAME_FROM_URL}"
           echo "Archive base name will be: ${FINAL_ARCHIVE_FILENAME}"
-          
+
           # خروجی‌ها برای استفاده در step های بعدی
-          echo "archive_base_name=${FINAL_ARCHIVE_FILENAME}" >> $GITHUB_OUTPUT
+          echo "archive_base_name=${FULL_ARCHIVE_NAME}" >> $GITHUB_OUTPUT
           echo "downloaded_file_name=${DOWNLOADED_FILE}" >> $GITHUB_OUTPUT
-          echo "file_extension=${FILENAME_EXT}" >> $GITHUB_OUTPUT # خروجی پسوند فایل
+          echo "file_extension=${FILENAME_EXT}" >> $GITHUB_OUTPUT
           echo "final_archive_name=${FINAL_ARCHIVE_FILENAME}" >> $GITHUB_OUTPUT
 
-                # اینجا فایل اصلی را هم با نام جدید (که شامل پیشوند است) تغییر نام می‌دهیم قبل از فشرده‌سازی
-          NEW_ORIGINAL_FILENAME="${ARCHIVE_NAME_PREFIX}"
-          if [[ -n "${{ steps.get_filename.outputs.file_extension }}" ]]; then # اگر پسوند داشت
-              NEW_ORIGINAL_FILENAME="${ARCHIVE_NAME_PREFIX}.${{ steps.get_filename.outputs.file_extension }}"
-          fi
-          mv "${{ steps.get_filename.outputs.downloaded_file_name }}" "$NEW_ORIGINAL_FILENAME"
-          echo "Renamed downloaded file to: $NEW_ORIGINAL_FILENAME"
+      - name: Rename downloaded file
+        id: rename_file
+        run: |
+          ARCHIVE_NAME_PREFIX="${{ steps.get_filename.outputs.archive_base_name }}"
+          DOWNLOADED_FILE="${{ steps.get_filename.outputs.downloaded_file_name }}"
+          EXT="${{ steps.get_filename.outputs.file_extension }}"
 
-          # حالا فایل تغییر نام یافته را فشرده می‌کنیم
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v85m "$ARCHIVE_NAME_PREFIX" "$NEW_ORIGINAL_FILENAME"
-          # فایل‌های ایجاد شده توسط 7z به صورت خودکار نام‌گذاری می‌شوند (مثلا sci-hub.ir_filename.7z.001)
+          NEW_ORIGINAL_FILENAME="$ARCHIVE_NAME_PREFIX"
+          if [[ -n "$EXT" ]]; then
+            NEW_ORIGINAL_FILENAME="${ARCHIVE_NAME_PREFIX}.${EXT}"
+          fi
+
+          mv "$DOWNLOADED_FILE" "$NEW_ORIGINAL_FILENAME"
+          echo "Renamed downloaded file to: $NEW_ORIGINAL_FILENAME"
+          echo "new_original_filename=$NEW_ORIGINAL_FILENAME" >> $GITHUB_OUTPUT
+
+      - name: Create encrypted split archive
+        run: |
+          ARCHIVE_NAME_PREFIX="${{ steps.get_filename.outputs.archive_base_name }}"
+          NEW_ORIGINAL_FILENAME="${{ steps.rename_file.outputs.new_original_filename }}"
+
+          # ساخت آرشیو چند تکه رمزدار ۷z (هر تکه حدود ۸۵ مگابایت)
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v85m "${ARCHIVE_NAME_PREFIX}.7z" "$NEW_ORIGINAL_FILENAME"
 
       - name: Remove original downloaded file
-        if: steps.get_filename.outputs.downloaded_file_name != ''
-        run: rm "${{ steps.get_filename.outputs.downloaded_file_name }}"
+        run: |
+          FILE="${{ steps.rename_file.outputs.new_original_filename }}"
+          if [[ -n "$FILE" && -f "$FILE" ]]; then
+            rm "$FILE"
+          fi
 
-      # کانفیگ Git برای استفاده از اکانت گیت‌هاب اکشن
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
 
-      # آماده‌سازی برای Push کردن
       - name: Commit and Push chunks
         run: |
-          # نام فایل آرشیو که در step قبل ایجاد شد (همان پیشوند)
           ARCHIVE_PREFIX_FOR_GIT="${{ steps.get_filename.outputs.archive_base_name }}"
           echo "Adding archive files matching pattern: ${ARCHIVE_PREFIX_FOR_GIT}.7z.*"
 
-          # افزودن تمام فایل‌های آرشیو به Git
-          # (*) به صورت خودکار همه chunk ها را اضافه می‌کند
-          git add "${ARCHIVE_PREFIX_FOR_GIT}.7z.*" 
+          git add "${ARCHIVE_PREFIX_FOR_GIT}.7z.*" || echo "No split 7z chunks found."
+          git add "${ARCHIVE_PREFIX_FOR_GIT}.7z" || true
+
           echo "Added archive chunks to staging."
 
-          # بررسی کنید آیا تغییری برای کامیت وجود دارد
           if ! git diff --staged --quiet; then
-            # کامیت کردن تمام تغییرات یکباره
             git commit -m "Add archive chunks for ${{ steps.get_filename.outputs.final_archive_name }}"
             echo "Committed all archive chunks."
 
-            # Push کردن تمام تغییرات با تلاش مجدد
             push_success=false
             max_attempts=15
+
             for attempt in $(seq 1 $max_attempts); do
               echo "Attempt $attempt of $max_attempts to push all changes..."
               if git push origin HEAD; then
@@ -149,10 +162,9 @@ jobs:
               echo "Failed to push all chunks after multiple attempts. Attempting force push with lease..."
               if git push origin HEAD --force-with-lease; then
                 echo "Force push successful."
-                push_success=true
               else
                 echo "Force push also failed. Aborting."
-                exit 1 # پایان دادن به workflow با خطا
+                exit 1
               fi
             fi
           else
